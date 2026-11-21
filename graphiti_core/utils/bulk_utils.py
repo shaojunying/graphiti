@@ -242,6 +242,8 @@ async def _entity_edge_record(
         'valid_at': edge.valid_at,
         'invalid_at': edge.invalid_at,
         'reference_time': edge.reference_time,
+        'contradicted_by': edge.contradicted_by,
+        'stated_invalid_at': edge.stated_invalid_at,
         'fact_embedding': edge.fact_embedding,
     }
 

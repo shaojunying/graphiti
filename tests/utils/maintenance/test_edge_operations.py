@@ -1946,3 +1946,83 @@ async def test_extract_edge_timestamps_prefers_edge_reference_time(monkeypatch):
         None,
         edge_reference_time,
     )
+
+
+def _guest_edge(guest: str, valid_day: int, **kwargs) -> EntityEdge:
+    return EntityEdge(
+        source_node_uuid='room',
+        target_node_uuid=guest,
+        name='HAS_GUEST',
+        group_id='group_1',
+        fact=f'{guest} is the guest in room 402',
+        episodes=[],
+        created_at=datetime(2026, 11, 20, tzinfo=timezone.utc),
+        valid_at=datetime(2026, 11, valid_day, tzinfo=timezone.utc),
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    ('stated_day', 'other_days', 'expected_day'),
+    [
+        (None, [], None),
+        (None, [3], 3),
+        (None, [5, 3], 3),
+        (10, [3], 3),
+        (2, [3], 2),
+        (None, [1], None),  # an edge that starts earlier does not end this edge
+    ],
+)
+def test_derive_invalid_at(stated_day, other_days, expected_day):
+    def day(value):
+        return None if value is None else datetime(2026, 11, value, tzinfo=timezone.utc)
+
+    edge = _guest_edge('Ivanov', 2, contradicted_by=[], stated_invalid_at=day(stated_day))
+    others = [_guest_edge(f'guest_{d}', d) for d in other_days]
+
+    assert edge_ops.derive_invalid_at(edge, others) == day(expected_day)
+
+
+@pytest.mark.asyncio
+async def test_resolve_extracted_edges_records_skipped_contradiction(monkeypatch):
+    monkeypatch.setattr(edge_ops, 'create_entity_edge_embeddings', AsyncMock(return_value=None))
+
+    async def immediate_gather(*aws, max_coroutines=None):
+        return [await aw for aw in aws]
+
+    monkeypatch.setattr(edge_ops, 'semaphore_gather', immediate_gather)
+
+    ended = datetime(2026, 11, 3, tzinfo=timezone.utc)
+    ivanov = _guest_edge('Ivanov', 1, invalid_at=ended, expired_at=ended)
+    monkeypatch.setattr(edge_ops, 'search', AsyncMock(return_value=SearchResults(edges=[ivanov])))
+
+    llm_client = MagicMock()
+    llm_client.generate_response = AsyncMock(
+        return_value={'duplicate_facts': [], 'contradicted_facts': [0]}
+    )
+    clients = SimpleNamespace(
+        driver=MagicMock(), llm_client=llm_client, embedder=MagicMock(), cross_encoder=MagicMock()
+    )
+    sidorov = _guest_edge('Sidorov', 5)
+    room = EntityNode(uuid='room', name='Room 402', group_id='group_1', labels=['Entity'])
+    guest = EntityNode(uuid='Sidorov', name='Sidorov', group_id='group_1', labels=['Entity'])
+    episode = EpisodicNode(
+        uuid='episode_uuid',
+        name='Episode',
+        group_id='group_1',
+        source='message',
+        source_description='desc',
+        content='Sidorov is the guest in room 402',
+        valid_at=datetime(2026, 11, 5, tzinfo=timezone.utc),
+    )
+
+    resolved_edges, invalidated_edges, _ = await resolve_extracted_edges(
+        clients, [sidorov], episode, [room, guest], {}, {}
+    )
+
+    # The date checks skip Ivanov, which ended before Sidorov started.
+    assert invalidated_edges == []
+    assert ivanov.invalid_at == ended
+    # The judgment stays on the new edge.
+    assert resolved_edges[0].contradicted_by == [ivanov.uuid]
+    assert resolved_edges[0].stated_invalid_at is None

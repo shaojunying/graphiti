@@ -27,7 +27,7 @@ from typing_extensions import LiteralString
 from graphiti_core.driver.driver import GraphDriver, GraphProvider
 from graphiti_core.embedder import EmbedderClient
 from graphiti_core.errors import EdgeNotFoundError, GroupsEdgesNotFoundError
-from graphiti_core.helpers import parse_db_date
+from graphiti_core.helpers import parse_contradicted_by, parse_db_date
 from graphiti_core.models.edges.edge_db_queries import (
     COMMUNITY_EDGE_RETURN,
     EPISODIC_EDGE_RETURN,
@@ -254,6 +254,17 @@ class EntityEdge(Edge):
     reference_time: datetime | None = Field(
         default=None, description='reference timestamp from the episode that produced this edge'
     )
+    contradicted_by: list[str] | None = Field(
+        default=None,
+        description=(
+            'uuids of the edges that the LLM judged to contradict this edge when this edge was '
+            'resolved; None for an edge from before Graphiti recorded these judgments'
+        ),
+    )
+    stated_invalid_at: datetime | None = Field(
+        default=None,
+        description='invalid_at from the source text, before a contradiction changed it',
+    )
     attributes: dict[str, Any] = Field(
         default={}, description='Additional attributes of the edge. Dependent on edge name'
     )
@@ -321,6 +332,8 @@ class EntityEdge(Edge):
             'valid_at': self.valid_at,
             'invalid_at': self.invalid_at,
             'reference_time': self.reference_time,
+            'contradicted_by': self.contradicted_by,
+            'stated_invalid_at': self.stated_invalid_at,
         }
 
         for k, v in (self.attributes or {}).items():
@@ -420,6 +433,37 @@ class EntityEdge(Edge):
         edges = [get_entity_edge_from_record(record, driver.provider) for record in records]
 
         return edges
+
+    @classmethod
+    async def get_by_contradicted_uuids(
+        cls, driver: GraphDriver, group_id: str, uuids: list[str]
+    ) -> list['EntityEdge']:
+        """Return the edges of the group whose `contradicted_by` holds one of the uuids."""
+        if len(uuids) == 0:
+            return []
+
+        contradicted_by = (
+            "split(e.contradicted_by, ',')"
+            if driver.provider == GraphProvider.NEPTUNE
+            else 'e.contradicted_by'
+        )
+        records, _, _ = await driver.execute_query(
+            """
+            MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity)
+            WHERE e.group_id = $group_id
+                AND e.contradicted_by IS NOT NULL
+            """
+            + f'AND any(uuid IN {contradicted_by} WHERE uuid IN $uuids)'
+            + """
+            RETURN
+            """
+            + get_entity_edge_return_query(driver.provider),
+            group_id=group_id,
+            uuids=uuids,
+            routing_='r',
+        )
+
+        return [get_entity_edge_from_record(record, driver.provider) for record in records]
 
     @classmethod
     async def get_by_group_ids(
@@ -915,6 +959,8 @@ def get_entity_edge_from_record(record: Any, provider: GraphProvider) -> EntityE
     attributes.pop('valid_at', None)
     attributes.pop('invalid_at', None)
     attributes.pop('reference_time', None)
+    contradicted_by = parse_contradicted_by(attributes.pop('contradicted_by', None))
+    stated_invalid_at = parse_db_date(attributes.pop('stated_invalid_at', None))
 
     edge = EntityEdge(
         uuid=record['uuid'],
@@ -930,6 +976,8 @@ def get_entity_edge_from_record(record: Any, provider: GraphProvider) -> EntityE
         valid_at=parse_db_date(record['valid_at']),
         invalid_at=parse_db_date(record['invalid_at']),
         reference_time=parse_db_date(record.get('reference_time')),
+        contradicted_by=contradicted_by,
+        stated_invalid_at=stated_invalid_at,
         attributes=attributes,
     )
 

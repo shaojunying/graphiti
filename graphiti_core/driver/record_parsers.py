@@ -17,7 +17,7 @@ limitations under the License.
 from typing import Any
 
 from graphiti_core.edges import EntityEdge
-from graphiti_core.helpers import parse_db_date
+from graphiti_core.helpers import parse_contradicted_by, parse_db_date
 from graphiti_core.nodes import CommunityNode, EntityNode, EpisodeType, EpisodicNode
 
 
@@ -66,6 +66,8 @@ def entity_edge_from_record(record: Any) -> EntityEdge:
     attributes.pop('valid_at', None)
     attributes.pop('invalid_at', None)
     attributes.pop('reference_time', None)
+    contradicted_by = parse_contradicted_by(attributes.pop('contradicted_by', None))
+    stated_invalid_at = parse_db_date(attributes.pop('stated_invalid_at', None))
 
     return EntityEdge(
         uuid=record['uuid'],
@@ -81,6 +83,8 @@ def entity_edge_from_record(record: Any) -> EntityEdge:
         valid_at=parse_db_date(record['valid_at']),
         invalid_at=parse_db_date(record['invalid_at']),
         reference_time=parse_db_date(record.get('reference_time')),
+        contradicted_by=contradicted_by,
+        stated_invalid_at=stated_invalid_at,
         attributes=attributes,
     )
 
