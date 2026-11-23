@@ -435,6 +435,37 @@ class EntityEdge(Edge):
         return edges
 
     @classmethod
+    async def get_by_contradicted_uuids(
+        cls, driver: GraphDriver, group_id: str, uuids: list[str]
+    ) -> list['EntityEdge']:
+        """Return the edges of the group whose `contradicted_by` holds one of the uuids."""
+        if len(uuids) == 0:
+            return []
+
+        contradicted_by = (
+            "split(e.contradicted_by, ',')"
+            if driver.provider == GraphProvider.NEPTUNE
+            else 'e.contradicted_by'
+        )
+        records, _, _ = await driver.execute_query(
+            """
+            MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity)
+            WHERE e.group_id = $group_id
+                AND e.contradicted_by IS NOT NULL
+            """
+            + f'AND any(uuid IN {contradicted_by} WHERE uuid IN $uuids)'
+            + """
+            RETURN
+            """
+            + get_entity_edge_return_query(driver.provider),
+            group_id=group_id,
+            uuids=uuids,
+            routing_='r',
+        )
+
+        return [get_entity_edge_from_record(record, driver.provider) for record in records]
+
+    @classmethod
     async def get_by_group_ids(
         cls,
         driver: GraphDriver,

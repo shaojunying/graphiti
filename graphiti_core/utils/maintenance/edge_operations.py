@@ -768,7 +768,7 @@ def _start_contradiction_record(edge: EntityEdge) -> None:
 
     The record keeps the end date from the source text before a contradiction changes
     it. An edge with a record can get its end date computed again when an edge that
-    contradicts it is deleted.
+    contradicts it is deleted (see `recompute_contradicted_edges`).
     """
     if edge.contradicted_by is None:
         edge.contradicted_by = []
@@ -787,6 +787,83 @@ def _record_contradictions(edge: EntityEdge, candidates: list[EntityEdge]) -> No
     for candidate in candidates:
         if candidate.uuid != edge.uuid and candidate.uuid not in edge.contradicted_by:
             edge.contradicted_by.append(candidate.uuid)
+
+
+def derive_invalid_at(edge: EntityEdge, contradicting_edges: list[EntityEdge]) -> datetime | None:
+    """Return the end date of an edge from its record.
+
+    The end date is the earliest of the end date from the source text and the
+    `valid_at` of each contradicting edge that starts after the edge. This is the
+    result of the date checks of `_apply_temporal_invalidation`, independent of the
+    order in which the edges arrived.
+    """
+    end_dates: list[datetime] = []
+    stated_invalid_at = ensure_utc(edge.stated_invalid_at)
+    if stated_invalid_at is not None:
+        end_dates.append(stated_invalid_at)
+    edge_valid_at = ensure_utc(edge.valid_at)
+    if edge_valid_at is not None:
+        for other in contradicting_edges:
+            other_valid_at = ensure_utc(other.valid_at)
+            if other_valid_at is not None and other_valid_at > edge_valid_at:
+                end_dates.append(other_valid_at)
+    return min(end_dates) if end_dates else None
+
+
+async def recompute_contradicted_edges(
+    driver: GraphDriver, group_id: str, deleted_edges: list[EntityEdge]
+) -> list[EntityEdge]:
+    """Compute again the end date of each edge that a deleted edge contradicted.
+
+    Call this function after the deletion of `deleted_edges`. An edge that a deleted
+    edge ended becomes current again, unless a different edge or the source text still
+    ends it. The function makes no LLM call. Edges without a contradiction record
+    stay unchanged. Returns the edges that the function saved.
+    """
+    deleted_uuids = {edge.uuid for edge in deleted_edges}
+    if not deleted_uuids:
+        return []
+
+    related_uuids = {uuid for edge in deleted_edges for uuid in (edge.contradicted_by or [])}
+    contradicting = await EntityEdge.get_by_contradicted_uuids(
+        driver, group_id, sorted(deleted_uuids)
+    )
+    related_uuids |= {edge.uuid for edge in contradicting}
+    related_uuids -= deleted_uuids
+    if not related_uuids:
+        return []
+
+    related_edges = await EntityEdge.get_by_uuids(driver, sorted(related_uuids))
+    saved: list[EntityEdge] = []
+    for edge in related_edges:
+        if edge.contradicted_by is None:
+            continue
+
+        contradicted_by = [uuid for uuid in edge.contradicted_by if uuid not in deleted_uuids]
+        others: dict[str, EntityEdge] = {
+            other.uuid: other for other in await EntityEdge.get_by_uuids(driver, contradicted_by)
+        }
+        for other in await EntityEdge.get_by_contradicted_uuids(driver, group_id, [edge.uuid]):
+            if other.uuid not in deleted_uuids:
+                others[other.uuid] = other
+
+        invalid_at = derive_invalid_at(edge, list(others.values()))
+        if contradicted_by == edge.contradicted_by and ensure_utc(invalid_at) == ensure_utc(
+            edge.invalid_at
+        ):
+            continue
+
+        if invalid_at is None:
+            edge.expired_at = None
+        elif edge.invalid_at is None:
+            edge.expired_at = utc_now()
+        edge.invalid_at = invalid_at
+        edge.contradicted_by = contradicted_by
+        await edge.load_fact_embedding(driver)
+        await edge.save(driver)
+        saved.append(edge)
+
+    return saved
 
 
 def _apply_temporal_invalidation(

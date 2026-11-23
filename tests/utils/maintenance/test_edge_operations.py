@@ -1962,6 +1962,27 @@ def _guest_edge(guest: str, valid_day: int, **kwargs) -> EntityEdge:
     )
 
 
+@pytest.mark.parametrize(
+    ('stated_day', 'other_days', 'expected_day'),
+    [
+        (None, [], None),
+        (None, [3], 3),
+        (None, [5, 3], 3),
+        (10, [3], 3),
+        (2, [3], 2),
+        (None, [1], None),  # an edge that starts earlier does not end this edge
+    ],
+)
+def test_derive_invalid_at(stated_day, other_days, expected_day):
+    def day(value):
+        return None if value is None else datetime(2026, 11, value, tzinfo=timezone.utc)
+
+    edge = _guest_edge('Ivanov', 2, contradicted_by=[], stated_invalid_at=day(stated_day))
+    others = [_guest_edge(f'guest_{d}', d) for d in other_days]
+
+    assert edge_ops.derive_invalid_at(edge, others) == day(expected_day)
+
+
 @pytest.mark.asyncio
 async def test_resolve_extracted_edges_records_skipped_contradiction(monkeypatch):
     monkeypatch.setattr(edge_ops, 'create_entity_edge_embeddings', AsyncMock(return_value=None))

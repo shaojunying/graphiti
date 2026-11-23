@@ -105,6 +105,7 @@ from graphiti_core.utils.maintenance.edge_operations import (
     _same_pair_edges,
     build_episodic_edges,
     extract_edges,
+    recompute_contradicted_edges,
     resolve_extracted_edge,
     resolve_extracted_edges,
 )
@@ -2560,6 +2561,9 @@ class Graphiti:
         await Edge.delete_by_uuids(self.driver, [edge.uuid for edge in edges_to_delete])
         await Node.delete_by_uuids(self.driver, [node.uuid for node in nodes_to_delete])
         await episode.delete(self.driver)
+
+        # An edge that a deleted edge ended gets its end date from the remaining edges.
+        await recompute_contradicted_edges(self.driver, episode.group_id, edges_to_delete)
 
         async def rebuild_node_summary(node: EntityNode) -> None:
             old_summary = node.summary
