@@ -74,6 +74,18 @@ def parse_db_date(input_date: neo4j_time.DateTime | str | None) -> datetime | No
     return input_date
 
 
+def parse_contradicted_by(value: list[str] | str | None) -> list[str] | None:
+    """Parse the stored `contradicted_by` of an entity edge.
+
+    Neptune stores the list as one comma-separated string.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [uuid for uuid in value.split(',') if uuid]
+    return list(value)
+
+
 def get_default_group_id(provider: GraphProvider) -> str:
     """
     This function differentiates the default group id based on the database type.

@@ -637,9 +637,13 @@ async def resolve_extracted_edges(
     logger.debug(f'Resolved edges: {[e.uuid for e in resolved_edges]}')
     logger.debug(f'New edges (non-duplicates): {[e.uuid for e in new_edges]}')
 
+    new_edge_uuids = {edge.uuid for edge in new_edges}
     for resolved_edge, _duplicates, candidates in dedupe_results:
+        if resolved_edge.uuid in new_edge_uuids:
+            _start_contradiction_record(resolved_edge)
         if candidates is None:
             continue
+        _record_contradictions(resolved_edge, candidates)
         had_end_date = resolved_edge.invalid_at is not None
         invalidated = _apply_temporal_invalidation(resolved_edge, candidates)
         invalidated_edges.extend(invalidated)
@@ -757,6 +761,32 @@ def enforce_edge_type_signatures(
         kept_edges.append(extracted_edge)
         kept_edge_types.append(matching_edge_types)
     return kept_edges, kept_edge_types
+
+
+def _start_contradiction_record(edge: EntityEdge) -> None:
+    """Start the contradiction record of a new edge.
+
+    The record keeps the end date from the source text before a contradiction changes
+    it. An edge with a record can get its end date computed again when an edge that
+    contradicts it is deleted.
+    """
+    if edge.contradicted_by is None:
+        edge.contradicted_by = []
+        edge.stated_invalid_at = edge.invalid_at
+
+
+def _record_contradictions(edge: EntityEdge, candidates: list[EntityEdge]) -> None:
+    """Record each candidate that the LLM judged to contradict the edge.
+
+    The record keeps the judgments that the date checks skip, because a skipped
+    judgment can end the edge or the candidate when a different edge is deleted.
+    An edge without a record (from before Graphiti recorded judgments) gets no record.
+    """
+    if edge.contradicted_by is None:
+        return
+    for candidate in candidates:
+        if candidate.uuid != edge.uuid and candidate.uuid not in edge.contradicted_by:
+            edge.contradicted_by.append(candidate.uuid)
 
 
 def _apply_temporal_invalidation(
@@ -902,8 +932,11 @@ async def resolve_extracted_edge(
         edge_type_candidates,
         **resolver_kwargs,
     )
+    if resolved_edge.uuid == extracted_edge.uuid:
+        _start_contradiction_record(resolved_edge)
     if candidates is None:
         return resolved_edge, [], duplicate_edges
+    _record_contradictions(resolved_edge, candidates)
     invalidated_edges = _apply_temporal_invalidation(resolved_edge, candidates)
     return resolved_edge, invalidated_edges, duplicate_edges
 
